@@ -1,435 +1,279 @@
 # neural_bandit.py
-"""Enhanced Neural Network with Advanced Visualization Metrics"""
+"""Enhanced Neural Contextual Bandit with Proper Training"""
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from typing import Dict, List, Tuple, Optional
 from collections import deque
-import json
-import os
-from datetime import datetime
+import random
+from typing import List, Tuple, Dict, Optional
+from pathlib import Path
+from config import *
 
 
-class StrategyScorer(nn.Module):
-    """Neural network that scores strategies based on context"""
+class DuelingDQN(nn.Module):
+    """Dueling Deep Q-Network for strategy selection"""
     
-    def __init__(self, input_dim: int = 784, hidden_dims: List[int] = [256, 128, 64], 
-                 output_dim: int = 5, dropout: float = 0.2):
-        super().__init__()
+    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int]):
+        super(DuelingDQN, self).__init__()
         
-        self.layers = nn.ModuleList()
-        self.activations = nn.ModuleList()
-        self.dropouts = nn.ModuleList()
-        
-        current_dim = input_dim
-        
-        # Build hidden layers with separate components for tracking
+        # Shared feature extractor
+        layers = []
+        prev_dim = input_dim
         for hidden_dim in hidden_dims:
-            self.layers.append(nn.Linear(current_dim, hidden_dim))
-            self.activations.append(nn.ReLU())
-            self.dropouts.append(nn.Dropout(dropout))
-            current_dim = hidden_dim
+            layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(NEURAL_DROPOUT),
+                nn.BatchNorm1d(hidden_dim)
+            ])
+            prev_dim = hidden_dim
         
-        # Output layer
-        self.output_layer = nn.Linear(current_dim, output_dim)
+        self.feature_extractor = nn.Sequential(*layers)
         
-        # Initialize weights
-        self.apply(self._init_weights)
+        # Value stream
+        self.value_stream = nn.Sequential(
+            nn.Linear(prev_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+        
+        # Advantage stream
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(prev_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, output_dim)
+        )
     
-    def _init_weights(self, module):
-        """Initialize network weights"""
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            nn.init.zeros_(module.bias)
+    def forward(self, x):
+        features = self.feature_extractor(x)
+        value = self.value_stream(features)
+        advantages = self.advantage_stream(features)
+        
+        # Combine value and advantages: Q = V + (A - mean(A))
+        q_values = value + (advantages - advantages.mean(dim=1, keepdim=True))
+        return q_values
+
+
+class PrioritizedReplayBuffer:
+    """Prioritized Experience Replay Buffer"""
     
-    def forward(self, x: torch.Tensor, return_intermediates: bool = False) -> torch.Tensor:
-        """Forward pass through network"""
-        if return_intermediates:
-            intermediates = {}
-            current = x
-            intermediates['input'] = current.detach().cpu().numpy()
-            
-            # Hidden layers
-            for i, (layer, activation, dropout) in enumerate(zip(self.layers, self.activations, self.dropouts)):
-                current = layer(current)
-                intermediates[f'layer_{i}_pre_activation'] = current.detach().cpu().numpy()
-                
-                current = activation(current)
-                intermediates[f'layer_{i}_post_activation'] = current.detach().cpu().numpy()
-                
-                current = dropout(current)
-                intermediates[f'layer_{i}_output'] = current.detach().cpu().numpy()
-            
-            # Output layer
-            output = self.output_layer(current)
-            intermediates['output'] = output.detach().cpu().numpy()
-            
-            return output, intermediates
+    def __init__(self, capacity: int, alpha: float = 0.6):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.buffer = []
+        self.priorities = []
+        self.position = 0
+    
+    def add(self, experience: Tuple, priority: float = 1.0):
+        """Add experience with priority"""
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(experience)
+            self.priorities.append(priority)
         else:
-            current = x
-            for layer, activation, dropout in zip(self.layers, self.activations, self.dropouts):
-                current = dropout(activation(layer(current)))
-            return self.output_layer(current)
+            self.buffer[self.position] = experience
+            self.priorities[self.position] = priority
+        
+        self.position = (self.position + 1) % self.capacity
     
-    def get_weight_statistics(self) -> Dict:
-        """Get detailed weight statistics for each layer"""
-        stats = {}
+    def sample(self, batch_size: int, beta: float = 0.4):
+        """Sample batch with prioritization"""
+        if len(self.buffer) == 0:
+            return [], [], []
         
-        for i, layer in enumerate(self.layers):
-            weight = layer.weight.detach().cpu().numpy()
-            bias = layer.bias.detach().cpu().numpy()
-            
-            stats[f'layer_{i}'] = {
-                'weight_mean': float(np.mean(weight)),
-                'weight_std': float(np.std(weight)),
-                'weight_min': float(np.min(weight)),
-                'weight_max': float(np.max(weight)),
-                'weight_norm': float(np.linalg.norm(weight)),
-                'bias_mean': float(np.mean(bias)),
-                'weight_shape': list(weight.shape)
-            }
+        # Calculate sampling probabilities
+        priorities = np.array(self.priorities[:len(self.buffer)])
+        probabilities = priorities ** self.alpha
+        probabilities /= probabilities.sum()
         
-        # Output layer
-        weight = self.output_layer.weight.detach().cpu().numpy()
-        bias = self.output_layer.bias.detach().cpu().numpy()
+        # Sample indices
+        indices = np.random.choice(len(self.buffer), 
+                                   size=min(batch_size, len(self.buffer)),
+                                   p=probabilities,
+                                   replace=False)
         
-        stats['output_layer'] = {
-            'weight_mean': float(np.mean(weight)),
-            'weight_std': float(np.std(weight)),
-            'weight_min': float(np.min(weight)),
-            'weight_max': float(np.max(weight)),
-            'weight_norm': float(np.linalg.norm(weight)),
-            'bias_mean': float(np.mean(bias)),
-            'weight_shape': list(weight.shape)
-        }
+        # Calculate importance sampling weights
+        weights = (len(self.buffer) * probabilities[indices]) ** (-beta)
+        weights /= weights.max()
         
-        return stats
+        samples = [self.buffer[idx] for idx in indices]
+        
+        return samples, indices, weights
+    
+    def update_priorities(self, indices: List[int], priorities: List[float]):
+        """Update priorities for sampled experiences"""
+        for idx, priority in zip(indices, priorities):
+            self.priorities[idx] = priority
+    
+    def __len__(self):
+        return len(self.buffer)
 
 
 class NeuralBandit:
-    """Enhanced Neural Contextual Bandit with Advanced Visualization"""
+    """Enhanced Neural Contextual Bandit"""
     
     def __init__(self, user_id: str, learning_rate: float = 0.001):
         self.user_id = user_id
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Initialize neural network
-        self.model = StrategyScorer().to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        self.criterion = nn.MSELoss()
+        # Networks
+        self.policy_net = DuelingDQN(
+            NEURAL_INPUT_DIM,
+            NEURAL_OUTPUT_DIM,
+            NEURAL_HIDDEN_DIMS
+        ).to(self.device)
         
-        # Training buffer
-        self.training_buffer = deque(maxlen=500)
+        self.target_net = DuelingDQN(
+            NEURAL_INPUT_DIM,
+            NEURAL_OUTPUT_DIM,
+            NEURAL_HIDDEN_DIMS
+        ).to(self.device)
         
-        # Enhanced metrics for visualization
-        self.training_history = {
-            'losses': [],
-            'timestamps': [],
-            'batch_numbers': [],
-            'learning_rates': [],
-            'gradient_norms': [],
-            'weight_norms': [],
-            'prediction_confidence': [],
-            'strategy_predictions': {i: [] for i in range(5)}
-        }
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
         
-        # Per-query learning tracking
-        self.query_learning_log = []
+        # Optimizer
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
+        self.loss_fn = nn.SmoothL1Loss()
         
-        # Weight evolution tracking
-        self.weight_snapshots = []
-        self.weight_snapshot_frequency = 5
+        # Replay buffer
+        self.replay_buffer = PrioritizedReplayBuffer(TRAINING_BUFFER_SIZE)
         
-        self.batch_count = 0
+        # Training metrics
+        self.training_step = 0
+        self.loss_history = deque(maxlen=100)
+        self.q_value_history = deque(maxlen=100)
+        self.reward_history = deque(maxlen=100)
         
-        # Load if exists
-        self.model_path = f"./rl_data/neural_model_{user_id}.pt"
-        self.history_path = f"./rl_data/training_history_{user_id}.json"
-        self.query_log_path = f"./rl_data/query_learning_{user_id}.json"
-        self._load_model()
+        # Beta annealing for importance sampling
+        self.beta = REPLAY_BETA_START
+        self.beta_increment = (1.0 - REPLAY_BETA_START) / REPLAY_BETA_FRAMES
+        
+        # Load existing model
+        self.model_path = MODELS_PATH / f"neural_bandit_{user_id}.pt"
+        self.load_model()
     
-    def predict(self, features: np.ndarray, return_confidence: bool = False):
-        """Predict strategy scores with optional confidence"""
-        self.model.eval()
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        """Predict Q-values for all actions"""
+        self.policy_net.eval()
         with torch.no_grad():
-            features_tensor = torch.FloatTensor(features).to(self.device)
-            if len(features_tensor.shape) == 1:
-                features_tensor = features_tensor.unsqueeze(0)
-            
-            scores = self.model(features_tensor)
-            scores_np = scores.cpu().numpy().squeeze()
-            
-            if return_confidence:
-                # Calculate confidence as entropy
-                probs = torch.softmax(scores, dim=-1).cpu().numpy().squeeze()
-                entropy = -np.sum(probs * np.log(probs + 1e-10))
-                max_entropy = np.log(len(probs))
-                confidence = 1 - (entropy / max_entropy)
-                
-                return scores_np, confidence
-            
-            return scores_np
+            features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+            q_values = self.policy_net(features_tensor)
+            return q_values.cpu().numpy()[0]
     
-    def predict_with_intermediates(self, features: np.ndarray) -> Tuple:
-        """Predict with intermediate activations for visualization"""
-        self.model.eval()
-        with torch.no_grad():
-            features_tensor = torch.FloatTensor(features).to(self.device)
-            if len(features_tensor.shape) == 1:
-                features_tensor = features_tensor.unsqueeze(0)
-            
-            scores, intermediates = self.model(features_tensor, return_intermediates=True)
-            scores_np = scores.cpu().numpy().squeeze()
-            
-            return scores_np, intermediates
+    def add_experience(self, features: np.ndarray, action: int, reward: float, 
+                      next_features: Optional[np.ndarray] = None):
+        """Add experience to replay buffer"""
+        # Calculate TD error as initial priority
+        current_q = self.predict(features)[action]
+        priority = abs(reward - current_q) + 1e-6
+        
+        experience = (features, action, reward, next_features)
+        self.replay_buffer.add(experience, priority)
+        
+        self.reward_history.append(reward)
     
-    def add_experience(self, features: np.ndarray, strategy_idx: int, reward: float,
-                      query: str = "", cluster: str = ""):
-        """Add experience to training buffer with metadata"""
-        self.training_buffer.append({
-            'features': features,
-            'strategy': strategy_idx,
-            'reward': reward,
-            'query': query[:100],
-            'cluster': cluster,
-            'timestamp': datetime.now().isoformat()
-        })
-    
-    def train_batch(self, batch_size: int = 10) -> Dict:
-        """Train on batch with comprehensive metrics"""
-        if len(self.training_buffer) < batch_size:
+    def train_batch(self, batch_size: int) -> Dict:
+        """Train on a batch from replay buffer"""
+        if len(self.replay_buffer) < batch_size:
             return {'trained': False, 'reason': 'insufficient_data'}
         
         # Sample batch
-        indices = np.random.choice(len(self.training_buffer), batch_size, replace=False)
-        batch = [self.training_buffer[i] for i in indices]
+        experiences, indices, weights = self.replay_buffer.sample(batch_size, self.beta)
         
-        # Store pre-training predictions
-        pre_predictions = []
-        for sample in batch:
-            with torch.no_grad():
-                pred_scores = self.predict(sample['features'])
-                pre_predictions.append(pred_scores.copy())
+        if not experiences:
+            return {'trained': False, 'reason': 'sampling_failed'}
         
-        # Prepare tensors
-        features = torch.FloatTensor([b['features'] for b in batch]).to(self.device)
-        strategies = torch.LongTensor([b['strategy'] for b in batch]).to(self.device)
-        rewards = torch.FloatTensor([b['reward'] for b in batch]).to(self.device)
+        # Prepare batch
+        states = torch.FloatTensor([exp[0] for exp in experiences]).to(self.device)
+        actions = torch.LongTensor([exp[1] for exp in experiences]).to(self.device)
+        rewards = torch.FloatTensor([exp[2] for exp in experiences]).to(self.device)
+        weights_tensor = torch.FloatTensor(weights).to(self.device)
         
-        # Training
-        self.model.train()
+        # Current Q values
+        self.policy_net.train()
+        current_q_values = self.policy_net(states)
+        current_q = current_q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
+        
+        # Target Q values (using target network)
+        with torch.no_grad():
+            target_q_values = self.target_net(states)
+            # Double DQN: use policy net to select action, target net to evaluate
+            next_actions = self.policy_net(states).argmax(dim=1)
+            target_q = target_q_values.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            target = rewards + NEURAL_GAMMA * target_q
+        
+        # Compute loss with importance sampling weights
+        td_errors = target - current_q
+        loss = (weights_tensor * td_errors.pow(2)).mean()
+        
+        # Optimize
         self.optimizer.zero_grad()
-        
-        # Forward pass
-        predicted_scores = self.model(features)
-        predicted_values = predicted_scores[range(len(batch)), strategies]
-        
-        # Compute loss
-        loss = self.criterion(predicted_values, rewards)
-        
-        # Backward pass
         loss.backward()
-        
-        # Calculate gradient norm
-        total_norm = 0.0
-        for p in self.model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        gradient_norm = total_norm ** 0.5
-        
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
         self.optimizer.step()
         
-        # Calculate weight norm
-        total_weight_norm = 0.0
-        for p in self.model.parameters():
-            param_norm = p.data.norm(2)
-            total_weight_norm += param_norm.item() ** 2
-        weight_norm = total_weight_norm ** 0.5
+        # Update priorities in replay buffer
+        priorities = td_errors.abs().detach().cpu().numpy() + 1e-6
+        self.replay_buffer.update_priorities(indices, priorities.tolist())
         
-        # Get post-training predictions
-        self.model.eval()
-        post_predictions = []
-        with torch.no_grad():
-            for sample in batch:
-                pred_scores = self.predict(sample['features'])
-                post_predictions.append(pred_scores.copy())
+        # Update target network
+        self.training_step += 1
+        if self.training_step % TARGET_UPDATE_FREQUENCY == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
         
-        # Calculate prediction changes
-        prediction_changes = []
-        for pre, post, sample in zip(pre_predictions, post_predictions, batch):
-            strategy_idx = sample['strategy']
-            change = post[strategy_idx] - pre[strategy_idx]
-            prediction_changes.append({
-                'query': sample['query'],
-                'strategy': strategy_idx,
-                'reward': sample['reward'],
-                'pre_score': float(pre[strategy_idx]),
-                'post_score': float(post[strategy_idx]),
-                'change': float(change),
-                'all_pre_scores': pre.tolist(),
-                'all_post_scores': post.tolist()
-            })
+        # Anneal beta
+        self.beta = min(1.0, self.beta + self.beta_increment)
         
-        # Record metrics
-        self.batch_count += 1
-        self.training_history['losses'].append(loss.item())
-        self.training_history['timestamps'].append(len(self.training_buffer))
-        self.training_history['batch_numbers'].append(self.batch_count)
-        self.training_history['gradient_norms'].append(gradient_norm)
-        self.training_history['weight_norms'].append(weight_norm)
-        self.training_history['learning_rates'].append(
-            self.optimizer.param_groups[0]['lr']
-        )
-        
-        # Calculate prediction confidence
-        avg_confidence = np.mean([
-            1 - (np.std(pred) / (np.max(pred) - np.min(pred) + 1e-6))
-            for pred in post_predictions
-        ])
-        self.training_history['prediction_confidence'].append(avg_confidence)
-        
-        # Track strategy-specific predictions
-        for pre, post in zip(pre_predictions, post_predictions):
-            for strategy_idx in range(5):
-                self.training_history['strategy_predictions'][strategy_idx].append(
-                    float(post[strategy_idx])
-                )
-        
-        # Log query-level learning
-        self.query_learning_log.extend(prediction_changes)
-        
-        # Keep only recent logs (last 100)
-        if len(self.query_learning_log) > 100:
-            self.query_learning_log = self.query_learning_log[-100:]
-        
-        # Save weight snapshot periodically
-        if self.batch_count % self.weight_snapshot_frequency == 0:
-            self.weight_snapshots.append({
-                'batch': self.batch_count,
-                'weights': self.model.get_weight_statistics()
-            })
-            # Keep only last 20 snapshots
-            if len(self.weight_snapshots) > 20:
-                self.weight_snapshots = self.weight_snapshots[-20:]
+        # Store metrics
+        loss_value = loss.item()
+        self.loss_history.append(loss_value)
+        self.q_value_history.append(current_q.mean().item())
         
         return {
             'trained': True,
-            'loss': loss.item(),
-            'batch_size': batch_size,
-            'buffer_size': len(self.training_buffer),
-            'batch_number': self.batch_count,
-            'gradient_norm': gradient_norm,
-            'weight_norm': weight_norm,
-            'prediction_changes': prediction_changes,
-            'avg_prediction_change': float(np.mean([abs(c['change']) for c in prediction_changes]))
+            'loss': loss_value,
+            'avg_q_value': current_q.mean().item(),
+            'training_step': self.training_step,
+            'buffer_size': len(self.replay_buffer),
+            'beta': self.beta
         }
-    
-    def get_training_metrics(self) -> Dict:
-        """Get comprehensive training metrics"""
-        return {
-            'total_batches': self.batch_count,
-            'buffer_size': len(self.training_buffer),
-            'recent_losses': self.training_history['losses'][-20:] if self.training_history['losses'] else [],
-            'all_losses': self.training_history['losses'],
-            'batch_numbers': self.training_history['batch_numbers'],
-            'gradient_norms': self.training_history['gradient_norms'],
-            'weight_norms': self.training_history['weight_norms'],
-            'learning_rates': self.training_history['learning_rates'],
-            'prediction_confidence': self.training_history['prediction_confidence'],
-            'strategy_predictions': self.training_history['strategy_predictions'],
-            'query_learning_log': self.query_learning_log[-20:],  # Recent 20
-            'weight_snapshots': self.weight_snapshots
-        }
-    
-    def get_layer_activations(self, features: np.ndarray) -> Dict:
-        """Get activation patterns for visualization"""
-        scores, intermediates = self.predict_with_intermediates(features)
-        
-        activation_stats = {}
-        for key, values in intermediates.items():
-            if 'post_activation' in key:
-                flat_values = values.flatten()
-                activation_stats[key] = {
-                    'mean': float(np.mean(flat_values)),
-                    'std': float(np.std(flat_values)),
-                    'sparsity': float(np.mean(flat_values == 0)),  # ReLU zeros
-                    'max': float(np.max(flat_values)),
-                    'sample': flat_values[:50].tolist()
-                }
-        
-        return activation_stats
     
     def save_model(self):
-        """Save model and training history"""
-        os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-        
-        # Save model
+        """Save model to disk"""
         torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'batch_count': self.batch_count
+            'policy_net_state': self.policy_net.state_dict(),
+            'target_net_state': self.target_net.state_dict(),
+            'optimizer_state': self.optimizer.state_dict(),
+            'training_step': self.training_step,
+            'beta': self.beta
         }, self.model_path)
-        
-        # Save history
-# Save history (convert numpy types to native Python types)
-        with open(self.history_path, 'w') as f:
-            json.dump(self.training_history, f, default=lambda x: float(x) if hasattr(x, 'item') else x)
-        
-        # Save query log
-        with open(self.query_log_path, 'w') as f:
-            json.dump(self.query_learning_log, f)
     
-    def _load_model(self):
-        """Load model if exists"""
-        if os.path.exists(self.model_path):
+    def load_model(self):
+        """Load model from disk"""
+        if self.model_path.exists():
             try:
                 checkpoint = torch.load(self.model_path, map_location=self.device)
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                self.batch_count = checkpoint.get('batch_count', 0)
-            except:
-                pass
-        
-        if os.path.exists(self.history_path):
-            try:
-                with open(self.history_path, 'r') as f:
-                    self.training_history = json.load(f)
-            except:
-                pass
-        
-        if os.path.exists(self.query_log_path):
-            try:
-                with open(self.query_log_path, 'r') as f:
-                    self.query_learning_log = json.load(f)
-            except:
-                pass
+                self.policy_net.load_state_dict(checkpoint['policy_net_state'])
+                self.target_net.load_state_dict(checkpoint['target_net_state'])
+                self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+                self.training_step = checkpoint.get('training_step', 0)
+                self.beta = checkpoint.get('beta', REPLAY_BETA_START)
+                print(f"Model loaded: step {self.training_step}")
+            except Exception as e:
+                print(f"Failed to load model: {e}")
     
-    def batch_train_synthetic(self, synthetic_data: List[Dict]) -> Dict:
-        """Train on synthetic data batch"""
-        if not synthetic_data:
-            return {'trained': False}
-        
-        # Add all to buffer
-        for sample in synthetic_data:
-            self.training_buffer.append(sample)
-        
-        # Train multiple batches
-        total_loss = 0.0
-        batches_trained = 0
-        
-        while len(self.training_buffer) >= 10:
-            result = self.train_batch(10)
-            if result['trained']:
-                total_loss += result['loss']
-                batches_trained += 1
-        
-        avg_loss = total_loss / batches_trained if batches_trained > 0 else 0.0
-        
+    def get_training_metrics(self) -> Dict:
+        """Get training metrics"""
         return {
-            'trained': True,
-            'batches': batches_trained,
-            'avg_loss': avg_loss
+            'training_steps': self.training_step,
+            'buffer_size': len(self.replay_buffer),
+            'recent_loss': np.mean(self.loss_history) if self.loss_history else 0.0,
+            'recent_q_value': np.mean(self.q_value_history) if self.q_value_history else 0.0,
+            'recent_reward': np.mean(self.reward_history) if self.reward_history else 0.0,
+            'loss_history': list(self.loss_history),
+            'q_value_history': list(self.q_value_history),
+            'reward_history': list(self.reward_history),
+            'beta': self.beta
         }

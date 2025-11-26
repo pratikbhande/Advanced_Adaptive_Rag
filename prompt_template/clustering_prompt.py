@@ -1,121 +1,98 @@
-# prompt_template/clustering_prompt.py
-"""Enhanced prompt for LLM-based semantic query clustering"""
+INTELLIGENT_QUERY_ANALYSIS_PROMPT = """You are an expert at analyzing user queries across multiple dimensions to understand their true information need.
 
-CLUSTERING_PROMPT = """You are an advanced semantic query clustering system for a Retrieval-Augmented Generation (RAG) application. Your task is to intelligently categorize user queries into meaningful semantic clusters.
+Analyze the following query across THREE dimensions:
 
 ═══════════════════════════════════════════════════════════
-                        CONTEXT
+DIMENSION 1: INTENT (What is the user trying to learn?)
 ═══════════════════════════════════════════════════════════
 
-USER QUERY:
+**definition** - User wants to know WHAT something IS (core meaning, basic identity)
+   Examples: "What is machine learning?", "Define RFP", "What does API mean?"
+   
+**explanation** - User wants to understand HOW or WHY something works (mechanisms, reasons)
+   Examples: "How does machine learning work?", "Why is RFP important?", "Explain the process"
+   
+**procedure** - User wants instructions on HOW TO DO something (actionable steps)
+   Examples: "How to implement ML?", "Steps to create an RFP", "Guide to using APIs"
+   
+**comparison** - User wants to understand DIFFERENCES or SIMILARITIES
+   Examples: "ML vs AI", "Compare RFP and RFQ", "Difference between REST and GraphQL"
+   
+**analysis** - User wants EVALUATION, REASONING, or CRITICAL THINKING
+   Examples: "Analyze the impact of ML", "Evaluate RFP effectiveness", "Why does X cause Y?"
+   
+**factual** - User wants SPECIFIC FACTS, DATA, or HISTORICAL INFORMATION
+   Examples: "When was ML invented?", "Who created the RFP process?", "How many types of APIs?"
+
+═══════════════════════════════════════════════════════════
+DIMENSION 2: DEPTH (How much detail does the user need?)
+═══════════════════════════════════════════════════════════
+
+**surface** - Quick, brief answer (1-2 sentences, key point only)
+   Indicators: "briefly", "in short", "quick", "summarize", casual phrasing
+   Examples: "What's RFP?", "Tell me about ML quick"
+   
+**moderate** - Standard explanation with context (3-5 sentences, balanced)
+   Indicators: Standard question format, no depth modifiers
+   Examples: "What is RFP?", "Explain machine learning"
+   
+**comprehensive** - Detailed, thorough coverage (multiple paragraphs, examples, nuance)
+   Indicators: "detailed", "comprehensive", "in depth", "elaborate", "everything about"
+   Examples: "Can you tell me everything about RFP?", "Detailed explanation of ML"
+
+═══════════════════════════════════════════════════════════
+DIMENSION 3: SCOPE (How focused is the question?)
+═══════════════════════════════════════════════════════════
+
+**specific** - Narrow focus on particular aspect
+   Indicators: Specific entity/concept named, precise question
+   Examples: "What is RFP?", "Define gradient descent"
+   
+**broad** - Wide-ranging, exploratory, or multiple aspects
+   Indicators: "tell me about", "overview", "introduction", "general", multiple topics
+   Examples: "Tell me about RFP hunting", "Overview of machine learning field"
+
+═══════════════════════════════════════════════════════════
+CRITICAL DISTINCTIONS TO MAKE:
+═══════════════════════════════════════════════════════════
+
+❌ WRONG: Treating "What is X?" and "Tell me about X" as the same
+✅ RIGHT: 
+   - "What is RFP?" → definition_moderate_specific (wants the definition)
+   - "Tell me about RFP" → explanation_comprehensive_broad (wants full context)
+   - "What's RFP?" → definition_surface_specific (casual, quick answer)
+
+❌ WRONG: Same intent for different phrasings
+✅ RIGHT:
+   - "Define machine learning" → definition_moderate_specific
+   - "How does machine learning work?" → explanation_comprehensive_specific
+   - "What can you tell me about ML?" → explanation_comprehensive_broad
+
+═══════════════════════════════════════════════════════════
+QUERY TO ANALYZE:
+═══════════════════════════════════════════════════════════
+
 "{query}"
 
-EXISTING CLUSTERS:
-{existing_clusters}
-
 ═══════════════════════════════════════════════════════════
-                    CLUSTERING GUIDELINES
+YOUR TASK:
 ═══════════════════════════════════════════════════════════
 
-**PRIMARY CONSIDERATIONS:**
-1. **Semantic Meaning**: Focus on the underlying intent and topic, not just keywords
-2. **Granularity**: Create clusters that are specific enough to be useful but general enough to group related queries
-3. **Consistency**: Maintain consistency with existing clusters when appropriate
-4. **Scalability**: Avoid creating too many narrow clusters
+Analyze this query carefully and respond in EXACTLY this format (three lines only):
 
-**WHEN TO ASSIGN TO EXISTING CLUSTER:**
-- The query shares the same core topic or domain
-- The intent and information need are similar
-- The query would benefit from similar retrieval strategies
+INTENT: <one of: definition, explanation, procedure, comparison, analysis, factual>
+DEPTH: <one of: surface, moderate, comprehensive>
+SCOPE: <one of: specific, broad>
 
-**WHEN TO CREATE NEW CLUSTER:**
-- The query represents a distinctly different topic or domain
-- The intent is fundamentally different from existing clusters
-- No existing cluster adequately represents the query's semantics
+Example outputs:
+INTENT: definition
+DEPTH: moderate
+SCOPE: specific
 
-═══════════════════════════════════════════════════════════
-                    CLUSTER NAMING RULES
-═══════════════════════════════════════════════════════════
+OR
 
-✅ GOOD cluster names:
-- Descriptive: "machine_learning_concepts", "python_debugging"
-- Domain-specific: "medical_diagnosis", "financial_analysis"
-- Intent-based: "how_to_tutorials", "comparison_queries"
-- Lowercase with underscores: "data_visualization_techniques"
+INTENT: explanation
+DEPTH: comprehensive
+SCOPE: broad
 
-❌ AVOID:
-- Too generic: "general", "miscellaneous"
-- Too specific: "what_is_gradient_descent_in_neural_networks"
-- Mixed case or spaces: "Machine Learning", "data analysis"
-- Numbers only: "cluster_1"
-
-═══════════════════════════════════════════════════════════
-                        EXAMPLES
-═══════════════════════════════════════════════════════════
-
-Example 1:
-Query: "What is machine learning?"
-Existing: ml_fundamentals, python_programming
-→ GROUP: ml_fundamentals
-Reason: Core ML concept query
-
-Example 2:
-Query: "How to implement gradient descent in Python?"
-Existing: ml_fundamentals, python_programming
-→ GROUP: ml_algorithm_implementation
-Reason: Combines ML algorithm with coding, needs new cluster
-
-Example 3:
-Query: "Explain photosynthesis process"
-Existing: ml_fundamentals, python_programming
-→ GROUP: biology_processes
-Reason: Different domain entirely
-
-Example 4:
-Query: "Deep learning vs machine learning"
-Existing: ml_fundamentals, comparison_queries
-→ GROUP: comparison_queries
-Reason: Fits existing comparison pattern
-
-Example 5:
-Query: "Best practices for data cleaning"
-Existing: ml_fundamentals, data_preprocessing
-→ GROUP: data_preprocessing
-Reason: Matches existing data preparation cluster
-
-═══════════════════════════════════════════════════════════
-                    YOUR TASK
-═══════════════════════════════════════════════════════════
-
-Analyze the user query and assign it to the most appropriate cluster.
-
-**OUTPUT FORMAT:**
-Respond with EXACTLY this format (one line only):
-
-GROUP: cluster_name
-
-**IMPORTANT:**
-- Provide ONLY the GROUP line
-- No explanations or additional text
-- Cluster name must be lowercase with underscores
-- Choose the most semantically appropriate cluster
-
-Your response:"""
-
-# Simplified version for faster processing
-CLUSTERING_PROMPT_FAST = """Assign this query to an appropriate semantic cluster.
-
-Query: "{query}"
-
-Existing clusters:
-{existing_clusters}
-
-Rules:
-- Use existing cluster if query is semantically similar
-- Create new descriptive cluster if query is distinctly different
-- Cluster names: lowercase_with_underscores
-
-Respond with ONLY:
-GROUP: cluster_name
-
-Your response:"""
+**RESPOND NOW:**"""

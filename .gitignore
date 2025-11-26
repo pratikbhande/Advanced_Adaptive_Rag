@@ -1,2 +1,53 @@
-/venv
-.env
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+chroma_db/
+data/
+logs/
+
+# Virtual environments
+env/
+venv/
+ENV/
+.venv/
+.pyenv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Logs
+*.log
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+*.cover
+*.py,cover
+.cache
+
+# IDEs / Editors
+.vscode/
+.idea/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Local config
+*.env
+*.ini
+
+# macOS
+.DS_Store
+
+# pyproject / poetry
+.poetry/

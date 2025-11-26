@@ -1,7 +1,7 @@
 # prompt_template/__init__.py
 """Prompt templates for Neural-RL Adaptive RAG"""
 
-from .clustering_prompt import CLUSTERING_PROMPT
+from .clustering_prompt import INTELLIGENT_QUERY_ANALYSIS_PROMPT 
 from .strategy_prompts import (
     CONCISE_PROMPT,
     DETAILED_PROMPT,
@@ -21,7 +21,7 @@ from .query_generation import (
 )
 
 __all__ = [
-    'CLUSTERING_PROMPT',
+    'INTELLIGENT_QUERY_ANALYSIS_PROMPT',
     'CONCISE_PROMPT',
     'DETAILED_PROMPT',
     'STRUCTURED_PROMPT',

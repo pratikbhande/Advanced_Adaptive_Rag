@@ -1,18 +1,18 @@
-# rag.py (Updated imports and usage)
-"""Enhanced Adaptive RAG with Neural-RL Integration"""
+# rag.py
+"""Enhanced Adaptive RAG with Multi-Dimensional Clustering"""
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from typing import Dict, List, Tuple
+import time
+
 from indexing import VectorStore
 from reinforcement_learning import EnhancedRLAgent
-from clustering import LLMQueryClusterer
+from clustering import IntelligentQueryClusterer  # Changed import
 from processor import TextProcessor
 from logger import SystemLogger
 from config import *
-import time
 
-# Import all prompt templates
 from prompt_template import (
     STRATEGY_PROMPTS,
     QUERY_COMPLEXITY_PROMPT,
@@ -21,7 +21,7 @@ from prompt_template import (
 
 
 class EnhancedAdaptiveRAG:
-    """Enhanced Adaptive RAG with Neural-RL"""
+    """Enhanced Adaptive RAG with Intelligent Multi-Dimensional Clustering"""
     
     def __init__(self, user_id: str, openai_api_key: str):
         self.user_id = user_id
@@ -40,16 +40,15 @@ class EnhancedAdaptiveRAG:
             openai_api_key=openai_api_key
         )
         
-        # Core components
+        # Core components - UPDATED CLUSTERER
         self.vector_store = VectorStore(user_id, openai_api_key)
         self.rl_agent = EnhancedRLAgent(user_id)
-        self.clusterer = LLMQueryClusterer(user_id, openai_api_key)
+        self.clusterer = IntelligentQueryClusterer(user_id, openai_api_key)  # New clusterer
         self.processor = TextProcessor()
         self.logger = SystemLogger(user_id)
         
         self.logger.log_session_start()
         
-        # Current query context (for feedback)
         self.current_context = None
     
     def index_document(self, file_content: str) -> int:
@@ -67,7 +66,7 @@ class EnhancedAdaptiveRAG:
             raise
     
     def analyze_query_complexity(self, query: str) -> str:
-        """Analyze query complexity using detailed prompt"""
+        """Analyze query complexity"""
         prompt = PromptTemplate.from_template(QUERY_COMPLEXITY_PROMPT)
         formatted_prompt = prompt.format(query=query)
         
@@ -75,50 +74,47 @@ class EnhancedAdaptiveRAG:
             response = self.analyzer_llm.invoke(formatted_prompt)
             complexity = response.content.strip().lower()
             
-            # Validate response
             valid_complexities = ["simple", "moderate", "complex"]
             for valid in valid_complexities:
                 if valid in complexity:
                     return valid
             
-            return "moderate"  # Default fallback
+            return "moderate"
         except Exception as e:
             self.logger.log_error(e, "analyze_query_complexity")
             return "moderate"
     
     def query(self, user_query: str) -> Tuple[str, Dict]:
-        """Process query with neural-RL strategy selection"""
+        """Process query with intelligent multi-dimensional clustering"""
         try:
             start_time = time.time()
             
-            # Preprocess query
             processed_query = self.processor.preprocess_query(user_query)
             
-            # Step 1: Assign to cluster
+            # Step 1: Multi-dimensional classification
             cluster_start = time.time()
-            cluster_name, is_new_cluster, cluster_info = self.clusterer.assign_cluster(processed_query)
+            cluster_name, cluster_info = self.clusterer.classify_query(processed_query)
             cluster_time = time.time() - cluster_start
             
             # Step 2: Analyze complexity
             complexity = self.analyze_query_complexity(processed_query)
             
-            # Step 3: Get cluster's best strategy
-            cluster_best_strategy = self.clusterer.get_best_strategy_for_cluster(cluster_name)
+            # Step 3: Get best strategy for this specific cluster
+            best_strategy = self.clusterer.get_best_strategy_for_cluster(cluster_name)
             
-            # Step 4: Extract features for neural network
+            # Step 4: Extract features
             features = self.rl_agent.extract_features(
-                processed_query, 
-                cluster_info['embedding'], 
-                complexity
+                processed_query,
+                cluster_info['feature_embedding']
             )
             
-            # Step 5: Select strategy using Neural Contextual Bandit
+            # Step 5: Select strategy
             strategy_start = time.time()
             strategy, top_k, selection_info = self.rl_agent.select_strategy(
                 processed_query,
-                cluster_info['embedding'],
-                complexity,
-                cluster_best_strategy
+                cluster_info['feature_embedding'],
+                cluster_name,
+                best_strategy
             )
             strategy_time = time.time() - strategy_start
             
@@ -133,29 +129,27 @@ class EnhancedAdaptiveRAG:
             
             if not retrieved_docs:
                 total_time = time.time() - start_time
-                return "I couldn't find relevant information to answer your question.", {
+                return "I couldn't find relevant information. Please index some documents first.", {
                     "strategy": strategy,
                     "strategy_description": STRATEGY_DESCRIPTIONS.get(strategy, ""),
                     "retrieved_docs": [],
                     "complexity": complexity,
                     "cluster_name": cluster_name,
                     "cluster_info": cluster_info,
-                    "is_new_cluster": is_new_cluster,
                     "selection_info": selection_info,
                     "timing": {
-                        "total": total_time,
-                        "clustering": cluster_time,
-                        "strategy_selection": strategy_time,
-                        "retrieval": retrieval_time,
+                        "total": round(total_time * 1000, 2),
+                        "classification": round(cluster_time * 1000, 2),
+                        "strategy_selection": round(strategy_time * 1000, 2),
+                        "retrieval": round(retrieval_time * 1000, 2),
                         "generation": 0
                     }
                 }
             
-            # Step 7: Generate response using strategy-specific prompt
+            # Step 7: Generate response
             generation_start = time.time()
             context = "\n\n".join([doc['content'] for doc in retrieved_docs])
             
-            # Get strategy-specific prompt from templates
             prompt_template = STRATEGY_PROMPTS[strategy]
             prompt = PromptTemplate.from_template(prompt_template)
             formatted_prompt = prompt.format(context=context, question=processed_query)
@@ -171,25 +165,24 @@ class EnhancedAdaptiveRAG:
                 'query': processed_query,
                 'strategy': strategy,
                 'response': answer,
-                'retrieved_docs': [doc['content'][:100] for doc in retrieved_docs],
                 'cluster_name': cluster_name,
-                'features': features
+                'features': features,
+                'complexity': complexity
             }
             
             metadata = {
                 "strategy": strategy,
                 "strategy_description": STRATEGY_DESCRIPTIONS.get(strategy, ""),
                 "top_k": top_k,
-                "retrieved_docs": [doc['content'][:100] for doc in retrieved_docs],
+                "retrieved_docs": [doc['content'][:150] for doc in retrieved_docs],
                 "complexity": complexity,
                 "cluster_name": cluster_name,
                 "cluster_info": cluster_info,
-                "is_new_cluster": is_new_cluster,
                 "selection_info": selection_info,
-                "used_cluster_strategy": strategy == cluster_best_strategy,
+                "best_strategy": best_strategy,
                 "timing": {
-                    "total": round(total_time * 1000, 2),  # ms
-                    "clustering": round(cluster_time * 1000, 2),
+                    "total": round(total_time * 1000, 2),
+                    "classification": round(cluster_time * 1000, 2),
                     "strategy_selection": round(strategy_time * 1000, 2),
                     "retrieval": round(retrieval_time * 1000, 2),
                     "generation": round(generation_time * 1000, 2)
@@ -203,22 +196,19 @@ class EnhancedAdaptiveRAG:
             raise
     
     def submit_feedback(self, feedback: int) -> Dict:
-        """Submit user feedback"""
+        """Submit user feedback and train"""
         if self.current_context is None:
-            return {"error": "No active query to provide feedback for"}
+            return {"error": "No active query"}
         
-        # Record feedback in RL agent
-        drift_detected = self.rl_agent.record_feedback(
+        result = self.rl_agent.record_feedback(
             query=self.current_context['query'],
             strategy=self.current_context['strategy'],
             response=self.current_context['response'],
             feedback=feedback,
-            retrieved_docs=self.current_context['retrieved_docs'],
             cluster_name=self.current_context['cluster_name'],
             features=self.current_context['features']
         )
         
-        # Record in clusterer
         reward = POSITIVE_REWARD if feedback > 0 else NEGATIVE_REWARD
         self.clusterer.record_strategy_performance(
             self.current_context['cluster_name'],
@@ -234,28 +224,26 @@ class EnhancedAdaptiveRAG:
         
         return {
             "recorded": True,
-            "drift_detected": drift_detected,
-            "strategy": self.current_context['strategy']
+            "drift_detected": result['drift_detected'],
+            "strategy": self.current_context['strategy'],
+            "training_result": result['training_result'],
+            "new_epsilon": result['new_epsilon']
         }
     
     def get_metrics(self) -> Dict:
-        """Get comprehensive system metrics"""
-        base_metrics = self.rl_agent.get_performance_metrics()
+        """Get comprehensive metrics"""
+        metrics = self.rl_agent.get_performance_metrics()
         
-        # Add cluster information
-        clusters_info = self.clusterer.get_all_clusters()
+        metrics['cluster_stats'] = self.clusterer.get_cluster_stats()
         
-        base_metrics['clusters'] = clusters_info
-        base_metrics['total_clusters'] = len(clusters_info)
+        metrics['learning_history'] = self.rl_agent.get_learning_history()
         
-        return base_metrics
+        return metrics
     
+    # Add to rag.py in EnhancedAdaptiveRAG class
 
-    # rag.py - Add this method to EnhancedAdaptiveRAG class
-
-    def generate_training_queries(self, text: str, num_queries: int = 20) -> List[str]:
+    def generate_training_queries(self, text: str, num_queries: int = 10) -> List[str]:
         """Generate training queries from text using LLM"""
-        from langchain_core.prompts import PromptTemplate
         from prompt_template import QUERY_GENERATION_PROMPT
         
         # Truncate text if too long
@@ -293,5 +281,5 @@ class EnhancedAdaptiveRAG:
             ][:num_queries]
     
     def clear_documents(self):
-        """Clear all indexed documents"""
+        """Clear all documents"""
         self.vector_store.clear_collection()

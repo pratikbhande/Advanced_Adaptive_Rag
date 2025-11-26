@@ -1,42 +1,38 @@
 # clustering.py
-"""LLM-based semantic query clustering"""
+"""Intelligent multi-dimensional query clustering"""
 
 import json
-import os
 import numpy as np
 from typing import Dict, Tuple, Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-from sentence_transformers import SentenceTransformer
+from config import *
+from prompt_template import INTELLIGENT_QUERY_ANALYSIS_PROMPT
 
-class LLMQueryClusterer:
-    """Intelligent query clustering using LLM"""
+
+class IntelligentQueryClusterer:
+    """Multi-dimensional query clustering for precise intent understanding"""
     
     def __init__(self, user_id: str, openai_api_key: str):
         self.user_id = user_id
-        self.data_dir = "./rl_data"
-        os.makedirs(self.data_dir, exist_ok=True)
+        self.data_dir = RL_DATA_PATH / f"clusters_{user_id}"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         
-        self.clusters_file = f"{self.data_dir}/query_clusters_{user_id}.json"
+        self.clusters_file = self.data_dir / "query_clusters.json"
         self.clusters = self._load_clusters()
         
-        # LLM for clustering
+        # LLM for classification
         self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0,
+            model=ANALYZER_MODEL,
+            temperature=ANALYZER_TEMPERATURE,
             openai_api_key=openai_api_key
         )
         
-        # Sentence transformer for embeddings
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        
-        # Clustering prompt template
-        from prompt_template.clustering_prompt import CLUSTERING_PROMPT
-        self.prompt_template = PromptTemplate.from_template(CLUSTERING_PROMPT)
+        self.prompt_template = PromptTemplate.from_template(INTELLIGENT_QUERY_ANALYSIS_PROMPT)
     
     def _load_clusters(self) -> Dict:
         """Load existing clusters"""
-        if os.path.exists(self.clusters_file):
+        if self.clusters_file.exists():
             with open(self.clusters_file, 'r') as f:
                 return json.load(f)
         return {}
@@ -46,141 +42,124 @@ class LLMQueryClusterer:
         with open(self.clusters_file, 'w') as f:
             json.dump(self.clusters, f, indent=2)
     
-    def _get_clusters_summary(self) -> str:
-        """Get summary of existing clusters for LLM"""
-        if not self.clusters:
-            return "No existing clusters yet."
-        
-        summary_parts = []
-        for cluster_name, data in list(self.clusters.items())[:15]:
-            example_queries = data['queries'][:3]
-            query_count = len(data['queries'])
-            summary_parts.append(
-                f"• {cluster_name} ({query_count} queries): {', '.join(example_queries)}"
-            )
-        
-        return "\n".join(summary_parts)
-    
-    def assign_cluster(self, query: str) -> Tuple[str, bool, Dict]:
+    def classify_query(self, query: str) -> Tuple[str, Dict]:
         """
-        Assign query to cluster using LLM
-        Returns: (cluster_name, is_new_cluster, cluster_info)
+        Classify query across multiple dimensions
+        Returns: (cluster_name, cluster_info)
         """
-        existing_summary = self._get_clusters_summary()
-        
-        formatted_prompt = self.prompt_template.format(
-            query=query,
-            existing_clusters=existing_summary
-        )
+        formatted_prompt = self.prompt_template.format(query=query)
         
         try:
             response = self.llm.invoke(formatted_prompt)
             content = response.content.strip()
             
-            # Parse response - expecting "GROUP: cluster_name"
-            cluster_name = None
+            # Parse response
+            intent = None
+            depth = None
+            scope = None
+            
             for line in content.split('\n'):
-                if line.startswith('GROUP:'):
-                    cluster_name = line.replace('GROUP:', '').strip()
-                    break
+                line = line.strip()
+                if line.startswith('INTENT:'):
+                    intent = line.split(':', 1)[1].strip().lower()
+                elif line.startswith('DEPTH:'):
+                    depth = line.split(':', 1)[1].strip().lower()
+                elif line.startswith('SCOPE:'):
+                    scope = line.split(':', 1)[1].strip().lower()
             
-            if not cluster_name:
-                cluster_name = f"cluster_{len(self.clusters)}"
+            # Validate and fallback
+            if intent not in INTENT_TYPES:
+                intent = 'explanation'
+            if depth not in DEPTH_LEVELS:
+                depth = 'moderate'
+            if scope not in SCOPE_TYPES:
+                scope = 'specific'
             
-            # Clean cluster name
-            cluster_name = cluster_name.lower().replace(' ', '_')
+            # Create cluster name
+            cluster_name = f"{intent}_{depth}_{scope}"
             
-            is_new = cluster_name not in self.clusters
-            
-            # Create/update cluster
-            if is_new:
+            # Initialize cluster if new
+            if cluster_name not in self.clusters:
                 self.clusters[cluster_name] = {
-                    'queries': [query],
+                    'queries': [],
                     'strategy_performance': {},
-                    'embedding': self.embedder.encode(query).tolist()
+                    'intent': intent,
+                    'depth': depth,
+                    'scope': scope
                 }
-            else:
-                if query not in self.clusters[cluster_name]['queries']:
-                    self.clusters[cluster_name]['queries'].append(query)
-                    # Update cluster embedding (moving average)
-                    old_emb = self.clusters[cluster_name]['embedding']
-                    new_emb = self.embedder.encode(query).tolist()
-                    n = len(self.clusters[cluster_name]['queries'])
-                    self.clusters[cluster_name]['embedding'] = [
-                        (old_emb[i] * (n-1) + new_emb[i]) / n 
-                        for i in range(len(old_emb))
-                    ]
+            
+            # Add query
+            if query not in self.clusters[cluster_name]['queries']:
+                self.clusters[cluster_name]['queries'].append(query)
+                # Keep last 50 queries per cluster
+                if len(self.clusters[cluster_name]['queries']) > 50:
+                    self.clusters[cluster_name]['queries'] = self.clusters[cluster_name]['queries'][-50:]
             
             self._save_clusters()
             
             cluster_info = {
                 'name': cluster_name,
+                'intent': intent,
+                'depth': depth,
+                'scope': scope,
                 'query_count': len(self.clusters[cluster_name]['queries']),
-                'embedding': self.clusters[cluster_name]['embedding']
+                'feature_embedding': self._get_feature_embedding(intent, depth, scope)
             }
             
-            return cluster_name, is_new, cluster_info
+            return cluster_name, cluster_info
             
         except Exception as e:
-            # Fallback to simple clustering
-            return self._fallback_cluster(query)
-    
-    def _fallback_cluster(self, query: str) -> Tuple[str, bool, Dict]:
-        """Fallback clustering using embeddings"""
-        query_embedding = self.embedder.encode(query)
-        
-        if not self.clusters:
-            new_cluster = "cluster_0"
-            self.clusters[new_cluster] = {
-                'queries': [query],
-                'strategy_performance': {},
-                'embedding': query_embedding.tolist()
-            }
-            self._save_clusters()
-            return new_cluster, True, {
-                'name': new_cluster,
-                'query_count': 1,
-                'embedding': query_embedding.tolist()
-            }
-        
-        # Find most similar cluster
-        best_cluster = None
-        best_similarity = -1
-        
-        for cluster_name, data in self.clusters.items():
-            cluster_emb = data['embedding']
-            similarity = np.dot(query_embedding, cluster_emb) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(cluster_emb)
-            )
+            print(f"Classification error: {e}")
+            # Simple fallback with defaults
+            intent = 'explanation'
+            depth = 'moderate'
+            scope = 'specific'
+            cluster_name = f"{intent}_{depth}_{scope}"
             
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_cluster = cluster_name
-        
-        # If similarity too low, create new cluster
-        if best_similarity < 0.6:
-            new_cluster = f"cluster_{len(self.clusters)}"
-            self.clusters[new_cluster] = {
-                'queries': [query],
-                'strategy_performance': {},
-                'embedding': query_embedding.tolist()
-            }
+            if cluster_name not in self.clusters:
+                self.clusters[cluster_name] = {
+                    'queries': [],
+                    'strategy_performance': {},
+                    'intent': intent,
+                    'depth': depth,
+                    'scope': scope
+                }
+            
+            self.clusters[cluster_name]['queries'].append(query)
             self._save_clusters()
-            return new_cluster, True, {
-                'name': new_cluster,
-                'query_count': 1,
-                'embedding': query_embedding.tolist()
+            
+            return cluster_name, {
+                'name': cluster_name,
+                'intent': intent,
+                'depth': depth,
+                'scope': scope,
+                'query_count': len(self.clusters[cluster_name]['queries']),
+                'feature_embedding': self._get_feature_embedding(intent, depth, scope)
             }
+    
+    def _get_feature_embedding(self, intent: str, depth: str, scope: str) -> list:
+        """Get multi-hot encoding for query dimensions"""
+        embedding = []
         
-        # Add to existing cluster
-        self.clusters[best_cluster]['queries'].append(query)
-        self._save_clusters()
+        # Intent one-hot (6 dimensions)
+        intent_vec = [0.0] * len(INTENT_TYPES)
+        if intent in INTENT_TYPES:
+            intent_vec[INTENT_TYPES.index(intent)] = 1.0
+        embedding.extend(intent_vec)
         
-        return best_cluster, False, {
-            'name': best_cluster,
-            'query_count': len(self.clusters[best_cluster]['queries']),
-            'embedding': self.clusters[best_cluster]['embedding']
-        }
+        # Depth one-hot (3 dimensions)
+        depth_vec = [0.0] * len(DEPTH_LEVELS)
+        if depth in DEPTH_LEVELS:
+            depth_vec[DEPTH_LEVELS.index(depth)] = 1.0
+        embedding.extend(depth_vec)
+        
+        # Scope one-hot (2 dimensions)
+        scope_vec = [0.0] * len(SCOPE_TYPES)
+        if scope in SCOPE_TYPES:
+            scope_vec[SCOPE_TYPES.index(scope)] = 1.0
+        embedding.extend(scope_vec)
+        
+        return embedding  # Total: 11 dimensions
     
     def record_strategy_performance(self, cluster_name: str, strategy: str, reward: float):
         """Record strategy performance for cluster"""
@@ -190,10 +169,12 @@ class LLMQueryClusterer:
         perf = self.clusters[cluster_name]['strategy_performance']
         
         if strategy not in perf:
-            perf[strategy] = {'total': 0, 'reward_sum': 0.0}
+            perf[strategy] = {'total': 0, 'wins': 0, 'reward_sum': 0.0}
         
         perf[strategy]['total'] += 1
         perf[strategy]['reward_sum'] += reward
+        if reward > 0:
+            perf[strategy]['wins'] += 1
         
         self._save_clusters()
     
@@ -208,43 +189,39 @@ class LLMQueryClusterer:
             return None
         
         best_strategy = None
-        best_avg_reward = float('-inf')
+        best_win_rate = 0.0
         
         for strategy, stats in perf.items():
-            if stats['total'] >= 3:  # Minimum samples
-                avg_reward = stats['reward_sum'] / stats['total']
-                if avg_reward > best_avg_reward:
-                    best_avg_reward = avg_reward
+            if stats['total'] >= 5:
+                win_rate = stats['wins'] / stats['total']
+                if win_rate > best_win_rate:
+                    best_win_rate = win_rate
                     best_strategy = strategy
         
-        return best_strategy if best_avg_reward > 0 else None
+        return best_strategy if best_win_rate > 0.5 else None
     
-    def get_cluster_info(self, cluster_name: str) -> Dict:
-        """Get detailed cluster information"""
-        if cluster_name not in self.clusters:
-            return {}
+    def get_cluster_stats(self) -> Dict:
+        """Get statistics for all clusters"""
+        stats = {}
         
-        cluster_data = self.clusters[cluster_name]
+        for cluster_name, cluster_data in self.clusters.items():
+            strategy_perf = {}
+            for strategy, perf in cluster_data['strategy_performance'].items():
+                if perf['total'] > 0:
+                    strategy_perf[strategy] = {
+                        'uses': perf['total'],
+                        'win_rate': round(perf['wins'] / perf['total'], 3),
+                        'avg_reward': round(perf['reward_sum'] / perf['total'], 3)
+                    }
+            
+            stats[cluster_name] = {
+                'intent': cluster_data.get('intent', 'unknown'),
+                'depth': cluster_data.get('depth', 'unknown'),
+                'scope': cluster_data.get('scope', 'unknown'),
+                'query_count': len(cluster_data['queries']),
+                'example_queries': cluster_data['queries'][-3:] if cluster_data['queries'] else [],
+                'strategy_performance': strategy_perf,
+                'best_strategy': self.get_best_strategy_for_cluster(cluster_name)
+            }
         
-        strategy_stats = {}
-        for strategy, stats in cluster_data['strategy_performance'].items():
-            if stats['total'] > 0:
-                strategy_stats[strategy] = {
-                    'uses': stats['total'],
-                    'avg_reward': round(stats['reward_sum'] / stats['total'], 3)
-                }
-        
-        return {
-            'name': cluster_name,
-            'query_count': len(cluster_data['queries']),
-            'example_queries': cluster_data['queries'][:3],
-            'strategy_performance': strategy_stats,
-            'best_strategy': self.get_best_strategy_for_cluster(cluster_name)
-        }
-    
-    def get_all_clusters(self) -> Dict:
-        """Get all clusters summary"""
-        return {
-            name: self.get_cluster_info(name)
-            for name in self.clusters.keys()
-        }
+        return stats
